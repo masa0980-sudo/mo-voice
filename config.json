@@ -1,0 +1,19 @@
+{
+  "hotkey_toggle": "<ctrl>+<alt>+<space>",
+  "hotkey_correct": "<ctrl>+<alt>+z",
+  "model": "small",
+  "compute_type": "int8",
+  "language": "ja",
+  "beam_size": 2,
+  "max_record_seconds": 300,
+  "injection_method": "clipboard",
+  "confidence_highlight": {"enabled": true, "threshold": 0.6},
+
+  "vault_path": "",
+
+  "context_rules": [
+    {"exe": "obsidian", "title": "", "categories": ["global"]},
+    {"exe": "code", "title": "", "categories": ["global"]},
+    {"exe": "", "title": "", "categories": ["global"]}
+  ]
+}

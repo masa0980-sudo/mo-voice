@@ -1,0 +1,11 @@
+faster-whisper>=1.2.0
+PyQt5>=5.15
+pynput>=1.8
+PyAudio>=0.2.14
+pywin32
+psutil
+pykakasi  # GPL-3.0-or-later。corrections の読み一致置換（表記ゆれ回収）に使用
+# openai-whisper は不要（faster-whisper で完結する）。
+# 以前は prompt_builder がこのパッケージのトークナイザを import しようとしていたが、
+# venv に入っていないため常に概算フォールバックへ落ちていた。現在はロード済みモデルの
+# hf_tokenizer を使うよう修正済み。

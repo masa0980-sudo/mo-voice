@@ -1,0 +1,14 @@
+# 学習データ・発話ログ・音声（すべて個人情報。リポジトリには絶対に入れない）
+data/
+
+# Python 仮想環境・キャッシュ
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
