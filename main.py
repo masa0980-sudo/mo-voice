@@ -15,7 +15,7 @@ sys.path.insert(0, str(APP_DIR))
 # (WinError 1114 / c10.dll)。Windows の DLL ロード順序問題。
 from faster_whisper import WhisperModel  # noqa: F401
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
 from pynput import keyboard
 
@@ -34,8 +34,53 @@ from vocab.corrections import Corrections
 from vocab.scanner import load_vocabulary, scan_vault
 
 
+# config.json が無い/壊れている場合に使う既定値。
+# 起動不能にせず「とりあえず動く」状態にするのが目的（ホットキーとモデルさえ
+# 決まっていれば音声入力は成立する）。
+DEFAULT_CONFIG = {
+    "hotkey_toggle": "<ctrl>+<alt>+<space>",
+    "hotkey_correct": "<ctrl>+<alt>+z",
+    "model": "small",
+    "compute_type": "int8",
+    "language": "ja",
+    "beam_size": 2,
+    "max_record_seconds": 300,
+    "injection_method": "clipboard",
+    "confidence_highlight": {"enabled": True, "threshold": 0.6},
+    "use_vault_vocab": False,
+    "vault_path": "",
+    "context_rules": [{"exe": "", "title": "", "categories": ["global"]}],
+}
+
+
 def load_config():
-    return json.loads((APP_DIR / "config.json").read_text(encoding="utf-8"))
+    """config.json を読む。無い/壊れている場合も落ちずに既定値で起動する。
+
+    Returns: (config, warning)  warning は問題があった場合の日本語メッセージ
+    """
+    path = APP_DIR / "config.json"
+    if not path.exists():
+        return dict(DEFAULT_CONFIG), (
+            "config.json が見つからないため既定設定で起動しました")
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return dict(DEFAULT_CONFIG), (
+            f"config.json を読めないため既定設定で起動しました（{e}）")
+    except OSError as e:
+        return dict(DEFAULT_CONFIG), (
+            f"config.json を開けないため既定設定で起動しました（{e}）")
+    if not isinstance(loaded, dict):
+        return dict(DEFAULT_CONFIG), (
+            "config.json の形式が不正なため既定設定で起動しました")
+    # 欠けているキーは既定値で補う（部分的に壊れた設定でも起動できるように）
+    config = dict(DEFAULT_CONFIG)
+    config.update(loaded)
+    missing = [k for k in DEFAULT_CONFIG if k not in loaded]
+    warning = ""
+    if missing:
+        warning = f"config.json に未設定の項目があります（既定値を使用: {', '.join(missing)}）"
+    return config, warning
 
 
 _MUTEX_NAME = "Global\\MOVoice_SingleInstance_Mutex"
@@ -71,7 +116,7 @@ def main():
         print("MO Voice は既に起動しています", file=sys.stderr)
         sys.exit(0)
 
-    config = load_config()
+    config, config_warning = load_config()
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -170,7 +215,8 @@ def main():
         app.quit()
 
     tray = Tray(on_rescan=rescan_vault, on_correct=open_correction,
-                on_quit=quit_app, vault_configured=vault_configured)
+                on_quit=quit_app, vault_configured=vault_configured,
+                on_retry_load=controller.retry_model_load)
 
     # 状態 → UI 反映
     def on_state(state):
@@ -187,6 +233,12 @@ def main():
     # 低信頼語があった場合、注入後に修正ダイアログを自動で開く（該当語をハイライト）
     controller.sig_suggest_correction.connect(
         lambda words: open_correction(highlight_words=words))
+
+    # config.json に問題があった場合はユーザーに知らせる（既定値で起動済み）
+    if config_warning:
+        from core import injector
+        injector.log.warning("config: %s", config_warning)
+        QTimer.singleShot(1500, lambda: tray.notify("MO Voice", config_warning))
 
     # グローバルホットキー（pynput スレッド → Qt シグナル経由で安全に実行）
     invoker = Invoker()

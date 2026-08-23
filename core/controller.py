@@ -24,6 +24,28 @@ IDLE = "idle"
 RECORDING = "recording"
 TRANSCRIBING = "transcribing"
 LOADING = "loading"
+FAILED = "failed"      # モデルのロードに失敗（リトライ待ち）
+
+
+def _mic_error_message(exc: Exception) -> str:
+    """PortAudio の英語エラーを、対処が分かる日本語メッセージに変換する。"""
+    raw = str(exc)
+    low = raw.lower()
+    if ("no default input" in low or "device unavailable" in low
+            or "invalid device" in low or "no such device" in low
+            or "invalid input device" in low or "-9996" in low
+            or "device not found" in low):
+        return ("マイクが見つかりません。マイクが接続されているか、"
+                "Windowsの「サウンド設定」で既定の入力デバイスが"
+                "選ばれているか確認してください")
+    if "access" in low or "denied" in low or "permission" in low:
+        return ("マイクへのアクセスが拒否されました。Windowsの"
+                "「設定 → プライバシーとセキュリティ → マイク」で、"
+                "デスクトップアプリのマイクアクセスを有効にしてください")
+    if "in use" in low or "busy" in low or "already" in low:
+        return ("マイクを他のアプリが使用中の可能性があります。"
+                "通話アプリや録音アプリを終了してからお試しください")
+    return f"マイクを開けませんでした。マイクの接続と設定を確認してください（{raw}）"
 
 
 class DictationController(QObject):
@@ -44,6 +66,8 @@ class DictationController(QObject):
         self.prompt_builder = prompt_builder
 
         self.state = LOADING
+        self.load_error = ""            # モデルロード失敗時の理由
+        self._load_in_progress = False  # ロード中の多重実行防止
         self.recorder = Recorder()
         self.last_result = ""
         self.last_injected_text = ""   # 入力欄に実際に注入したテキスト
@@ -67,16 +91,61 @@ class DictationController(QObject):
     # ---- モデルロード ----
 
     def start_model_load(self):
+        """モデルをバックグラウンドでロードする。
+
+        初回起動時は HuggingFace から数百MBのダウンロードが走るため、
+        オフライン・プロキシ・ディスク不足で失敗しうる。従来は例外を捕まえて
+        おらずスレッドが死に、状態が LOADING のまま永久固着していた
+        （ユーザーにはホットキーを押すたび「ロード中です」が出るだけだった）。
+        """
+        if self._load_in_progress:
+            return
+        self._load_in_progress = True
+        self.state = LOADING
+        self.sig_state.emit(LOADING)
+
         def _load():
-            self.transcriber.load()
+            try:
+                self.transcriber.load()
+            except Exception as e:
+                injector.log.exception("モデルのロードに失敗")
+                self.load_error = str(e)
+                self.state = FAILED
+                self.sig_state.emit(FAILED)
+                self.sig_message.emit(
+                    "MO Voice",
+                    "音声モデルを読み込めませんでした。ネットワーク接続を確認して、"
+                    "トレイメニューの「モデルを再読み込み」をお試しください\n"
+                    f"（{type(e).__name__}: {e}）")
+                return
+            finally:
+                self._load_in_progress = False
+            self.load_error = ""
             self.state = IDLE
             self.sig_state.emit(IDLE)
             self.sig_message.emit("MO Voice", "準備完了。Ctrl+Alt+Space で録音開始")
         threading.Thread(target=_load, daemon=True).start()
 
+    def retry_model_load(self):
+        """モデルのロードをやり直す（トレイメニューから呼ばれる）。"""
+        if self.state == IDLE:
+            self.sig_message.emit("MO Voice", "モデルは既に読み込み済みです")
+            return
+        if self._load_in_progress:
+            self.sig_message.emit("MO Voice", "モデルを読み込み中です")
+            return
+        self.sig_message.emit("MO Voice", "モデルを再読み込みしています...")
+        self.start_model_load()
+
     # ---- トグル ----
 
     def _on_toggle(self):
+        if self.state == FAILED:
+            self.sig_message.emit(
+                "MO Voice",
+                "音声モデルが読み込めていないため録音できません。"
+                "トレイメニューの「モデルを再読み込み」をお試しください")
+            return
         if self.state == LOADING:
             self.sig_message.emit("MO Voice", "モデルをロード中です。少しお待ちください")
             return
@@ -93,8 +162,11 @@ class DictationController(QObject):
         self._record_hwnd = ctypes.windll.user32.GetForegroundWindow()
         try:
             self.recorder.start()
-        except OSError as e:
-            self.sig_message.emit("MO Voice", f"マイクを開けません: {e}")
+        except Exception as e:
+            # PortAudio の生の英語メッセージをそのまま見せない
+            # （OSError 以外にも PyAudio 初期化時の例外がありうるので広く捕まえる）
+            injector.log.exception("マイクを開けませんでした")
+            self.sig_message.emit("MO Voice", _mic_error_message(e))
             return
         self.state = RECORDING
         self._record_started = time.time()

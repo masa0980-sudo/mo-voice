@@ -8,6 +8,7 @@ STATE_COLORS = {
     "idle": QColor(90, 200, 120),
     "recording": QColor(235, 60, 60),
     "transcribing": QColor(80, 150, 255),
+    "failed": QColor(200, 120, 40),   # モデル読み込み失敗（要リトライ）
 }
 
 
@@ -29,7 +30,7 @@ def _make_icon(color: QColor) -> QIcon:
 
 class Tray(QSystemTrayIcon):
     def __init__(self, on_rescan, on_correct, on_quit, parent=None,
-                 vault_configured=True):
+                 vault_configured=True, on_retry_load=None):
         super().__init__(parent)
         self._icons = {k: _make_icon(c) for k, c in STATE_COLORS.items()}
         self.setIcon(self._icons["loading"])
@@ -39,6 +40,13 @@ class Tray(QSystemTrayIcon):
         act_correct = QAction("直前の結果を修正して学習 (Ctrl+Alt+Z)", menu)
         act_correct.triggered.connect(on_correct)
         menu.addAction(act_correct)
+        # モデルのDL失敗（オフライン等）から復帰する手段。これが無いと
+        # LOADING のまま固着して再起動以外に手がなくなる
+        self._act_retry = QAction("モデルを再読み込み", menu)
+        if on_retry_load is not None:
+            self._act_retry.triggered.connect(on_retry_load)
+        self._act_retry.setVisible(False)  # 失敗時のみ表示
+        menu.addAction(self._act_retry)
         # Obsidian を使わないユーザーには押しても0語彙で終わる操作を見せない
         if vault_configured:
             act_rescan = QAction("Obsidian vault を再スキャン", menu)
@@ -63,8 +71,10 @@ class Tray(QSystemTrayIcon):
             "idle": "MO Voice - 待機中（Ctrl+Alt+Space で録音）",
             "recording": "MO Voice - 録音中",
             "transcribing": "MO Voice - 認識中",
+            "failed": "MO Voice - モデル読み込み失敗（メニューから再読み込み）",
         }
         self.setToolTip(tips.get(state, "MO Voice"))
+        self._act_retry.setVisible(state == "failed")
 
     def notify(self, title: str, body: str):
         self.showMessage(title, body, QSystemTrayIcon.Information, 4000)

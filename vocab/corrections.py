@@ -7,9 +7,12 @@
 """
 import difflib
 import json
+import logging
 import re
 import time
 from pathlib import Path
+
+log = logging.getLogger("injector")  # injector と同じログファイルに出す
 
 KATAKANA_RE = re.compile(r"[ァ-ヴー]")
 LATIN_RE = re.compile(r"[A-Za-z0-9]")
@@ -87,16 +90,48 @@ class Corrections:
         self._load()
 
     def _load(self):
-        if self.path.exists():
+        if not self.path.exists():
+            return
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+            # 空リストで続行すると、次の _save() が壊れたファイルを
+            # 空で上書きして学習データが完全に失われる。退避してから続行する
+            log.error("corrections.json を読めませんでした: %s", e)
             try:
-                self.pairs = json.loads(self.path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self.pairs = []
+                backup = self.path.with_suffix(
+                    f".corrupt-{time.strftime('%Y%m%d_%H%M%S')}.json")
+                self.path.replace(backup)
+                log.error("破損ファイルを退避しました: %s", backup.name)
+            except OSError as e2:
+                log.error("破損ファイルの退避にも失敗: %s", e2)
+            self.pairs = []
+            return
+        if not isinstance(data, list):
+            log.error("corrections.json の形式が不正です（リストではない）")
+            self.pairs = []
+            return
+        self.pairs = [p for p in data if isinstance(p, dict)
+                      and p.get("wrong") and p.get("right")]
 
     def _save(self):
+        """アトミックに書き出す。
+
+        直接 write_text すると、書き込み中にプロセスが落ちた場合
+        （このアプリは restart スクリプトで強制終了されることがある）
+        ファイルが途中まで書かれた壊れた状態で残る。
+        一時ファイルに書いてから置き換えることで、その窓をなくす。
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(self.pairs, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = self.path.with_suffix(".tmp")
+        try:
+            tmp.write_text(
+                json.dumps(self.pairs, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError as e:
+            log.error("corrections.json の保存に失敗: %s", e)
+            tmp.unlink(missing_ok=True)
 
     def learn(self, original: str, corrected: str):
         """編集前後のテキストから置換ペアを抽出して蓄積する。"""

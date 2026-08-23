@@ -1,20 +1,28 @@
 """アクティブウィンドウから語彙カテゴリを判定するモジュール。"""
+import logging
 import re
 
 import psutil
 import win32gui
 import win32process
 
+log = logging.getLogger("injector")  # injector と同じログファイルに出す
+
 
 def get_active_window():
-    """(exe名小文字, ウィンドウタイトル) を返す。取得失敗時は ('', '')。"""
+    """(exe名小文字, ウィンドウタイトル) を返す。取得失敗時は ('', '')。
+
+    取得できなくても録音自体は続行できるため例外は握るが、注入先ガードの
+    判定材料になる情報なので、無言にせずログには残す。
+    """
     try:
         hwnd = win32gui.GetForegroundWindow()
         title = win32gui.GetWindowText(hwnd) or ""
         _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
         exe = psutil.Process(pid).name().lower()
         return exe, title
-    except Exception:
+    except Exception as e:
+        log.warning("アクティブウィンドウを取得できませんでした: %s", e)
         return "", ""
 
 
