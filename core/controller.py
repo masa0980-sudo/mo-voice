@@ -136,7 +136,8 @@ class DictationController(QObject):
         # 渡すため認識時間が2.5倍に悪化し（60秒音声で14.2秒→36.5秒・実測）、
         # かつ認識品質に有意差がなかったため不採用（2026-08-22 検証）
         prompt = self.prompt_builder.build_prompt(
-            self.vocabulary, self.corrections, categories)
+            self.vocabulary, self.corrections, categories,
+            use_vault_vocab=self.config.get("use_vault_vocab", False))
 
         def _work():
             audio_file = self._save_audio(audio)

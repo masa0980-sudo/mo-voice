@@ -11,6 +11,7 @@ LEAD = "以下は日本語の発話です。"
 
 
 _tokenizer = None  # set_tokenizer() で外部から注入する
+_special_overhead = 0  # encode() が1回ごとに付ける特殊トークン数
 
 
 def set_tokenizer(tok):
@@ -21,15 +22,25 @@ def set_tokenizer(tok):
     使われていた。日本語は1トークンで複数文字を表すことが多く、概算は実測の約1.4倍に
     過大評価される（224予算のうち約31%を無駄にしていた）。
     追加ダウンロードを避けるため、既にロード済みのモデルが持つトークナイザを使う。
+
+    注入時に「空文字のエンコード長」を測って特殊トークン数を求めておく。
+    Whisper のトークナイザは encode() のたびに <|startoftranscript|> 等の制御用
+    トークンを3個付けるため、これを引かないと語ごとの見積もりが大幅に水増しされる
+    （実測: 30語で90トークン＝予算223の41%が実在しないトークンで埋まっていた）。
     """
-    global _tokenizer
+    global _tokenizer, _special_overhead
     _tokenizer = tok
+    try:
+        _special_overhead = len(tok.encode("").ids)
+    except Exception:
+        _special_overhead = 0
 
 
 def count_tokens(text: str) -> int:
+    """text が prompt 文字列に占める実トークン数を返す（特殊トークンを除く）。"""
     if _tokenizer is not None:
         try:
-            return len(_tokenizer.encode(text).ids)
+            return max(0, len(_tokenizer.encode(text).ids) - _special_overhead)
         except Exception:
             pass
     # フォールバック: 日本語は1文字≒1トークン強で概算（モデル未ロード時のみ）
@@ -37,7 +48,8 @@ def count_tokens(text: str) -> int:
 
 
 def build_hotwords(vocabulary: dict, corrections=None, categories=None,
-                   budget: int = TOKEN_BUDGET) -> str:
+                   budget: int = TOKEN_BUDGET,
+                   use_vault_vocab: bool = False) -> str:
     """語彙DB・修正学習・アクティブカテゴリから hotwords 文字列を作る。
 
     hotwords は initial_prompt と違い、全デコードウィンドウに毎回渡される
@@ -56,7 +68,12 @@ def build_hotwords(vocabulary: dict, corrections=None, categories=None,
         blocked = {p["wrong"] for p in corrections.pairs}
 
     def add(term):
-        if term and term not in seen and term not in blocked:
+        # 語の区切りに「、」を使うため、それ自体を含む語は入れない
+        # （corrections には「ァ、しんど」のように区切り文字を含む学習結果が
+        #   混ざることがあり、そのまま入れると断片に割れて意味をなさない）
+        if not term or "、" in term:
+            return
+        if term not in seen and term not in blocked:
             seen.add(term)
             candidates.append(term)
 
@@ -70,13 +87,28 @@ def build_hotwords(vocabulary: dict, corrections=None, categories=None,
         for t in corrections.recent_corrected_terms(limit=15):
             add(t)
 
-    terms = vocabulary.get("terms", [])
-    # 2. アクティブカテゴリの語彙（freq 降順のまま）
-    if "global" not in categories or len(categories) > 1:
-        for item in terms:
-            if set(item["categories"]) & set(categories):
-                add(item["term"])
-    # 3. グローバル頻出語
+    # vault語彙の注入は既定で無効（use_vault_vocab=False）。
+    # 2026-08-23に実発話11件でA/B測定した結果、vault語彙を入れると平均一致率が
+    # 0.9019 → 0.8958 と悪化した。「英字混じりの技術用語が悪い」という仮説で
+    # 絞り込みも試したが、スラッグ除外 0.8900 / 英字全除外 0.8834 とかえって悪化し、
+    # 絞り方の問題ではなく「ノートに書いてある＝発話される」という推測自体が
+    # 成り立たないと判断した（corrections の実績ベース学習は有効なので残す）。
+    # スキャン機能自体は将来の用途（hotwords 等）のために保持する。
+    terms = vocabulary.get("terms", []) if use_vault_vocab else []
+    # 2. アクティブカテゴリに「特徴的な」語を優先する。
+    #    単にカテゴリ一致で絞ると、頻出語（Claude・リンク等）は十数カテゴリに
+    #    属するためどのアプリでも同じ顔ぶれになり、文脈判定が実質無効になる
+    #    （実測: カテゴリ一致だけだと全語彙の65〜83%がヒットしてしまう）。
+    #    freq をカテゴリ数で割り、少数カテゴリに集中している語を上位に出す。
+    active = set(categories)
+    if "global" not in active or len(active) > 1:
+        matched = [it for it in terms if set(it["categories"]) & active]
+        matched.sort(
+            key=lambda it: it["freq"] / max(1, len(it["categories"])),
+            reverse=True)
+        for item in matched:
+            add(item["term"])
+    # 3. グローバル頻出語（カテゴリを問わず頻出するものを残り枠で拾う）
     for item in terms:
         add(item["term"])
 
@@ -97,7 +129,16 @@ def build_hotwords(vocabulary: dict, corrections=None, categories=None,
 
 
 def build_prompt(vocabulary: dict, corrections=None, categories=None,
-                 budget: int = TOKEN_BUDGET) -> str:
-    """後方互換用。旧 initial_prompt 形式（リード文＋語彙）を返す。"""
-    hot = build_hotwords(vocabulary, corrections, categories, budget)
-    return LEAD + "用語: " + hot if hot else LEAD
+                 budget: int = TOKEN_BUDGET,
+                 use_vault_vocab: bool = False) -> str:
+    """initial_prompt 形式（リード文＋語彙）を返す。
+
+    initial_prompt はリード文も同じ予算を消費するため、その分を差し引いた
+    残りを語彙に割り当てる（build_hotwords 単体は語彙のみで予算を使う想定）。
+    """
+    head = LEAD + "用語: "
+    hot = build_hotwords(
+        vocabulary, corrections, categories,
+        max(0, budget - count_tokens(head)),
+        use_vault_vocab=use_vault_vocab)
+    return head + hot if hot else LEAD

@@ -41,6 +41,7 @@ KANJI_STOPWORDS = {
     "場合", "方法", "問題", "結果", "内容", "情報", "状態", "予定", "時間",
     "部分", "全体", "以下", "以上", "以外", "参照", "記事", "画像", "画面",
     "一つ", "二つ", "三つ", "一部", "一番", "簡単", "重要", "普通", "本当",
+    "索引", "目次", "一覧", "関連", "参考", "備考", "以降", "現在", "今後",
 }
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
@@ -90,19 +91,28 @@ def _categories_for(rel_path: Path) -> list:
     return cats or ["general"]
 
 
+# 索引・目次など、閲覧用の構造ファイル名（発話には現れないので語彙にしない）
+STRUCTURAL_NAME_RE = re.compile(
+    r"索引|目次|一覧|^index$|^readme$|^toc$|^moc$", re.IGNORECASE)
+
+
 def _filename_term(stem: str) -> str:
     """ノート名を用語として使えるなら返す（使えなければ空文字）。
 
     Obsidian ではノート名がそのまま概念名になることが多いため、
-    ファイル名は重み付きの語彙候補として扱う。ただし日付ノート（日記等）や
-    極端に短い/長い名前は語彙として意味がないので除外する。
+    ファイル名は重み付きの語彙候補として扱う。ただし以下は語彙にしない:
+    - 日付ノート（日記等）
+    - 索引・目次のような閲覧用の構造ファイル（口に出して言う語ではない）
+    - 極端に短い/長い名前
+    先頭の並び順制御プレフィックス（`00_` 等）は取り除く。
     """
     term = (stem or "").strip()
+    term = NUM_PREFIX_RE.sub("", term).strip()
     if len(term) < 2 or len(term) > 30:
         return ""
-    if DATEISH_RE.match(term):
+    if DATEISH_RE.match(term) or term.isdigit():
         return ""
-    if term.isdigit():
+    if STRUCTURAL_NAME_RE.search(term):
         return ""
     return term
 
@@ -133,9 +143,13 @@ def _valid_english(term: str) -> bool:
 
 def _extract_terms(text: str):
     """本文から (term, weight) を列挙する。"""
-    # frontmatter タグ・wikilink・見出しは重み高め
+    # frontmatter タグ・wikilink・見出しは重み高め。
+    # wikilink の中身はノート名なのでファイル名と同じ基準で選別する
+    # （索引ノートは全ノートからリンクされるため、素通しすると高頻度語になる）
     for m in WIKILINK_RE.finditer(text):
-        yield m.group(1).strip(), 5
+        link = _filename_term(m.group(1).strip())
+        if link:
+            yield link, 5
     for m in TAG_RE.finditer(text):
         yield m.group(1).strip(), 3
     for m in HEADING_RE.finditer(text):

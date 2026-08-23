@@ -7,13 +7,34 @@
   "beam_size": 2,
   "max_record_seconds": 300,
   "injection_method": "clipboard",
-  "confidence_highlight": {"enabled": true, "threshold": 0.6},
-
+  "confidence_highlight": {
+    "enabled": true,
+    "threshold": 0.6
+  },
+  "//use_vault_vocab": "vaultから抽出した語彙をinitial_promptに入れるか。既定false（実測で精度が悪化したため）",
+  "use_vault_vocab": false,
   "vault_path": "",
-
   "context_rules": [
-    {"exe": "obsidian", "title": "", "categories": ["global"]},
-    {"exe": "code", "title": "", "categories": ["global"]},
-    {"exe": "", "title": "", "categories": ["global"]}
+    {
+      "exe": "obsidian",
+      "title": "",
+      "categories": [
+        "global"
+      ]
+    },
+    {
+      "exe": "code",
+      "title": "",
+      "categories": [
+        "global"
+      ]
+    },
+    {
+      "exe": "",
+      "title": "",
+      "categories": [
+        "global"
+      ]
+    }
   ]
 }
