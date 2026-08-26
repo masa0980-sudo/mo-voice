@@ -7,6 +7,9 @@ Windows常駐型の音声入力（ディクテーション）アプリです。�
 音声認識は [faster-whisper](https://github.com/SYSTRAN/faster-whisper) を使い、
 **すべてお使いのPC内で処理されます**。音声もテキストも外部に送信しません。
 
+開発の経緯は note の記事
+「[Claude Codeで自分専用の音声入力アプリを作ってみた](https://note.com/mo0980/n/n2b17e64f4599)」（無料）に書いています。
+
 ## 特徴
 
 - **どのアプリでも使える** — 常駐してホットキーを待ち、アクティブな入力欄に注入します
@@ -28,7 +31,7 @@ Windows常駐型の音声入力（ディクテーション）アプリです。�
 ## インストール
 
 ```bash
-git clone https://github.com/<your-account>/mo-voice.git
+git clone https://github.com/masa0980-sudo/mo-voice.git
 cd mo-voice
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
@@ -146,6 +149,11 @@ Obsidian vault からユーザー固有の用語を抽出し、認識のヒン�
 
 ログは `data/app.log` に出ます。
 
+導入から実運用までのつまずきどころ（起動が2〜3分かかる問題の解決、入力欄に
+文字が入らない5つの原因、誤認識の育て方、実運用中の `config.json` 全文など）を
+1本にまとめた解説記事も用意しています:
+[【無料ツール付き】話すだけで文字入力！Windows音声入力アプリ導入＆実運用ガイド](https://brain-market.com/u/ma0980/a/b4YjNyYjMgoTZsNWa0JXY)（有料・980円）
+
 ## 既知の制約
 
 - **Windows専用**です。macOS / Linux では動作しません
@@ -178,3 +186,9 @@ GUIに **PyQt5（GPL v3）**、読み正規化に **pykakasi（GPL-3.0-or-later�
 
 音声モデルは [Systran/faster-whisper-small](https://huggingface.co/Systran/faster-whisper-small)
 （MIT）を初回起動時にダウンロードします。
+
+## 関連リンク
+
+- [Claude Codeで自分専用の音声入力アプリを作ってみた](https://note.com/mo0980/n/n2b17e64f4599) — 開発の経緯・設計の裏話（note・無料）
+- [【無料ツール付き】話すだけで文字入力！Windows音声入力アプリ導入＆実運用ガイド](https://brain-market.com/u/ma0980/a/b4YjNyYjMgoTZsNWa0JXY) — 導入〜実運用の完全ガイド（Brain・980円）
+- [作者のnote（MO）](https://note.com/mo0980) — Claude Code・AI活用の記事を書いています
