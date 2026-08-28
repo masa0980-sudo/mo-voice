@@ -28,7 +28,7 @@ DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "vocabulary.json"
 
 KATAKANA_RE = re.compile(r"[ァ-ヴー]{3,}")
 ENGLISH_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.+#-]{2,}")
-KANJI_RUN_RE = re.compile(r"[一-龥]{2,6}")  # 漢字複合語（博物館・美術館 等）
+KANJI_RUN_RE = re.compile(r"[一-龥]{2,6}")  # 漢字複合語（整骨院・博物館 等）
 
 # 頻出しすぎて語彙ヒントにならない一般的な漢字語（時間・動作・様子など）。
 # initial_prompt の予算は223トークンしかないため、Whisperが確実に知っている
@@ -164,7 +164,7 @@ def _extract_terms(text: str):
     for m in ENGLISH_RE.finditer(text):
         if _valid_english(m.group(0)):
             yield m.group(0), 1
-    # 漢字複合語（博物館・美術館 等）。同音異義語の誤変換（対照→対象 等）は
+    # 漢字複合語（整骨院・博物館 等）。同音異義語の誤変換（成骨院）は
     # カタカナ・英字だけでは救えないため漢字語も語彙ヒントに含める
     for m in KANJI_RUN_RE.finditer(text):
         if m.group(0) not in KANJI_STOPWORDS:

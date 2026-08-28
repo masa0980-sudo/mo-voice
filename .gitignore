@@ -12,3 +12,8 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# PyInstaller のビルド生成物（配布物はGitHub Releasesに置く。リポジトリには入れない）
+build/
+dist/
+*.manifest

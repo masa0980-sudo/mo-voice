@@ -82,7 +82,7 @@ def build_hotwords(vocabulary: dict, corrections=None, categories=None,
         for t in corrections.right_terms(limit=20):
             add(t)
         # 1.5. 最近の修正後テキストに含まれる語（ユーザーが実際に発話した確定語彙。
-        # vault にまだ書かれていない語もここから拾える。「対象→対照」のような
+        # vault にまだ書かれていない語もここから拾える。「整骨院→成骨院」のような
         # 同音異義語の誤変換対策）
         for t in corrections.recent_corrected_terms(limit=15):
             add(t)

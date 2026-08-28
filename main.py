@@ -209,14 +209,92 @@ def main():
                 _rescan_lock.release()
         threading.Thread(target=_scan, daemon=True).start()
 
+    # グローバルホットキーのリスナー。設定変更時に貼り直せるよう関数化してある
+    # （代入するため、参照する各クロージャは nonlocal 宣言が必要）
+    hotkeys = None
+
+    def _register_hotkeys():
+        """config の内容でホットキーを（再）登録する。成功したら True。
+
+        失敗しても例外を投げない: 不正な組み合わせでリスナーが起動できない場合、
+        黙って全ホットキーが死ぬと原因が分からなくなるため、呼び出し側が
+        ユーザーに通知できるよう真偽値で返す。
+        """
+        nonlocal hotkeys
+        old = hotkeys
+        try:
+            new = keyboard.GlobalHotKeys({
+                config.get("hotkey_toggle", "<ctrl>+<alt>+<space>"):
+                    controller.sig_toggle.emit,
+                config.get("hotkey_correct", "<ctrl>+<alt>+z"):
+                    invoker.sig_correct.emit,
+            })
+            new.start()
+        except Exception:
+            from core import injector
+            injector.log.exception("ホットキーの登録に失敗")
+            return False  # 旧リスナーは止めていないので、従来のキーが生き続ける
+        if old is not None:
+            old.stop()
+        hotkeys = new
+        return True
+
     def quit_app():
         controller.sig_cancel.emit()  # 録音中ならマイクストリームを閉じる
-        hotkeys.stop()
+        if hotkeys is not None:
+            hotkeys.stop()
         app.quit()
+
+    def open_settings():
+        """設定ダイアログを開く。
+
+        config は controller 等が使用時に get() で読むため、dict を
+        in-place 更新するだけでほとんどの項目が再起動なしで効く。
+        ホットキーだけは pynput へ登録済みなので、ここで貼り直す。
+        """
+        nonlocal vault_configured
+        try:
+            from ui.settings_dialog import SettingsDialog
+            learned = len(getattr(corrections, "pairs", []) or [])
+            terms = len(vocabulary.get("terms", []) or [])
+            state = (
+                f"モデル: {config.get('model', 'small')}"
+                f"（{config.get('compute_type', 'int8')}）　"
+                f"学習済みの修正: {learned} 件　"
+                f"ノート由来の語彙: {terms} 語\n"
+                f"設定ファイル: {APP_DIR / 'config.json'}"
+            )
+            before_hotkeys = (config.get("hotkey_toggle"),
+                              config.get("hotkey_correct"))
+            dlg = SettingsDialog(config, corrections,
+                                 APP_DIR / "config.json", state_text=state)
+            if not dlg.exec_():
+                return
+
+            msgs = ["設定を保存しました"]
+            if (config.get("hotkey_toggle"),
+                    config.get("hotkey_correct")) != before_hotkeys:
+                if _register_hotkeys():
+                    msgs.append("ホットキーを更新しました")
+                else:
+                    msgs.append("ホットキーの再登録に失敗したため再起動してください")
+
+            _vp2 = (config.get("vault_path") or "").strip()
+            vault_configured = bool(_vp2) and Path(_vp2).is_dir()
+            tray.set_vault_configured(vault_configured)
+
+            if dlg.restart_required:
+                msgs.append("モデルの変更は再起動後に反映されます")
+            tray.notify("MO Voice", " / ".join(msgs))
+        except Exception:
+            from core import injector
+            injector.log.exception("open_settings で例外")
+            tray.notify("MO Voice", "設定画面でエラーが発生しました")
 
     tray = Tray(on_rescan=rescan_vault, on_correct=open_correction,
                 on_quit=quit_app, vault_configured=vault_configured,
-                on_retry_load=controller.retry_model_load)
+                on_retry_load=controller.retry_model_load,
+                on_settings=open_settings)
 
     # 状態 → UI 反映
     def on_state(state):
@@ -243,13 +321,11 @@ def main():
     # グローバルホットキー（pynput スレッド → Qt シグナル経由で安全に実行）
     invoker = Invoker()
     invoker.sig_correct.connect(open_correction)
-    hotkeys = keyboard.GlobalHotKeys({
-        config.get("hotkey_toggle", "<ctrl>+<alt>+<space>"):
-            controller.sig_toggle.emit,
-        config.get("hotkey_correct", "<ctrl>+<alt>+z"):
-            invoker.sig_correct.emit,
-    })
-    hotkeys.start()
+    if not _register_hotkeys():
+        QTimer.singleShot(2000, lambda: tray.notify(
+            "MO Voice",
+            "ホットキーを登録できませんでした。config.json の hotkey_toggle / "
+            "hotkey_correct を確認してください"))
     controller.start_model_load()
 
     # 初回起動時に語彙が空なら自動スキャン

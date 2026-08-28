@@ -1,14 +1,11 @@
-# MO Voice の依存パッケージ（Windows専用）
-# 各パッケージのライセンスは README.md を参照してください。
-
-faster-whisper>=1.2.0   # MIT。音声認識
-PyQt5>=5.15             # GPL v3。トレイ常駐・ダイアログ
-pynput>=1.8             # LGPL v3。グローバルホットキー
-PyAudio>=0.2.14         # MIT。マイク録音
-pywin32                 # PSF。クリップボード・ウィンドウ操作
-psutil                  # BSD-3-Clause。プロセス優先度・アクティブアプリ判定
-numpy                   # BSD-3-Clause。音声データ処理
-
-# 任意: 読みの表記ゆれ吸収（「クロードコードー」→「クロードコード」等）に使用。
-# 未導入でも起動・動作します（該当機能が無効になるだけ）。
-pykakasi                # GPL-3.0-or-later
+faster-whisper>=1.2.0
+PyQt5>=5.15
+pynput>=1.8
+PyAudio>=0.2.14
+pywin32
+psutil
+pykakasi  # GPL-3.0-or-later。corrections の読み一致置換（表記ゆれ回収）に使用
+# openai-whisper は不要（faster-whisper で完結する）。
+# 以前は prompt_builder がこのパッケージのトークナイザを import しようとしていたが、
+# venv に入っていないため常に概算フォールバックへ落ちていた。現在はロード済みモデルの
+# hf_tokenizer を使うよう修正済み。
