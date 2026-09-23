@@ -212,6 +212,7 @@ class Corrections:
                 text = new_text
                 p["last_used"] = time.time()
         text = self._apply_reading_match(text, active)
+        text = self._apply_fuzzy_match(text, active)
         return text
 
     # 読みが短い語は「ビル/ビール」のような別語衝突のリスクがあるため対象外
@@ -245,6 +246,110 @@ class Corrections:
                 if new_text != text:
                     text = new_text
                     p["last_used"] = time.time()
+        return text
+
+    # ---- 第3段: 学習済み語に「読み・綴りが近い」揺れの回収（2026-09-23） ----
+    # 背景: 第2段は読みの完全一致だけなので、「プロドコード」「プロードコード」（→Claude Code）、
+    # 「Orian4」「Oriun4」（→Orion4）、「ペクセルカウント」のような1〜2文字違いの揺れを
+    # 拾えなかった。以前棄却したファジーマッチ（精度25%）は「未知の誤りをテキスト全体から探す」
+    # 探索タスクだったが、ここは**既に学習した語の揺れ**だけを対象にし、照合するのは
+    # テキスト中の連続カタカナ域・英字域に限る。corrections_log.jsonl を時系列に再生した
+    # 検証（各時点で過去の修正だけから学習した辞書を使用）で、修正あり58件に対し
+    # 正解10件・有害0件・悪化0件、修正されなかった履歴56件での発火は1件（正しい修正）だった。
+    # 評価の再現は scripts/eval_corrections.py。
+    FUZZY_MIN_LEN = 4        # 読み（英字は綴り）がこれより短い語は対象外（別語衝突の防止）
+    FUZZY_KATA_SIM = 0.70    # カタカナ域: 正規化した読みの編集距離類似度
+    FUZZY_LATIN_SIM = 0.65   # 英字域: 小文字化した綴りの編集距離類似度
+    _FUZZY_LATIN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9\-]{2,}")
+    _FUZZY_KATA_RUN = re.compile(r"[ァ-ヴー・]{3,}")
+    _LATIN_ONLY = re.compile(r"[A-Za-z0-9\- ]+")
+    _KANA_ONLY = re.compile(r"[ぁ-ゖァ-ヴー・\s]+")
+
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        """1 - 編集距離/長い方の長さ。"""
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i]
+            for j, cb in enumerate(b, 1):
+                cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+            prev = cur
+        return 1.0 - prev[-1] / max(len(a), len(b))
+
+    def _apply_fuzzy_match(self, text: str, active) -> str:
+        """第3段: テキスト中のカタカナ域・英字域を、学習済みの wrong／right と近似照合して right へ置換する。
+
+        安全弁（いずれも検証で見つかった誤爆の型をそのまま塞いだもの）:
+        - 学習済みの正解語そのもの、およびその構成語（「Claude Code」の「Code」）は触らない
+          （「Code」を学習語「Codec」へ置換してしまう誤爆が9件出た）
+        - 正解が仮名だけで読みが同じ＝カタカナ⇔ひらがなの表記差は直さない（「イマイチ」→「いまいち」）
+        - 英字で正解語の一部（「Orion」⊂「Orion4」）は略称として正しい可能性が高いので触らない
+        """
+        if not text or not active:
+            return text
+        rights = {p["right"] for p in active}
+        right_tokens = {t.lower() for r in rights for t in re.split(r"[\s・]+", r) if t}
+        kata_keys, latin_keys = [], []
+        for p in active:
+            for src in (p["wrong"], p["right"]):
+                if self._LATIN_ONLY.fullmatch(src):
+                    k = src.replace(" ", "").lower()
+                    if len(k) >= self.FUZZY_MIN_LEN:
+                        latin_keys.append((k, p["right"], p))
+                else:
+                    k = _reading_of(src)
+                    if len(k) >= self.FUZZY_MIN_LEN:
+                        kata_keys.append((k, p["right"], p))
+
+        def best(key, keys):
+            s_best, r_best, p_best = 0.0, None, None
+            for k, r, p in keys:
+                s = self._similarity(key, k)
+                if s > s_best:
+                    s_best, r_best, p_best = s, r, p
+            return s_best, r_best, p_best
+
+        for run in sorted(set(self._FUZZY_KATA_RUN.findall(text)), key=len, reverse=True):
+            rk = _normalize_kata(run)
+            if len(rk) < self.FUZZY_MIN_LEN or run in rights or run.lower() in right_tokens:
+                continue
+            s, right, p = best(rk, kata_keys)
+            if not right or s < self.FUZZY_KATA_SIM:
+                continue
+            if self._KANA_ONLY.fullmatch(right) and _reading_of(right) == rk:
+                continue
+            if run == right or run in right or right in run:
+                continue
+            # 正解が数字で終わる（Andromeda4 等）とき、直後の同じ数字も置換範囲に含める
+            # （「アンドロメダ4」のカタカナ部分だけ置換すると「Andromeda44」になる）
+            m_digits = re.search(r"\d+$", right)
+            tail = f"(?:{re.escape(m_digits.group(0))}(?!\\d))?" if m_digits else ""
+            new_text = re.sub(r"(?<![ァ-ヴー])" + re.escape(run) + r"(?![ァ-ヴー])" + tail,
+                              lambda m, r=right: r, text)
+            if new_text != text:
+                log.info("corrections: 読み近似で置換 %r→%r (%.2f)", run, right, s)
+                text = new_text
+                p["last_used"] = time.time()
+
+        for run in sorted(set(self._FUZZY_LATIN_RUN.findall(text)), key=len, reverse=True):
+            rk = run.lower()
+            if len(rk) < self.FUZZY_MIN_LEN or run in rights or rk in right_tokens:
+                continue
+            s, right, p = best(rk, latin_keys)
+            if not right or s < self.FUZZY_LATIN_SIM or s >= 1.0:
+                continue
+            if rk in right.lower().replace(" ", ""):
+                continue
+            new_text = re.sub(r"(?<![A-Za-z0-9])" + re.escape(run) + r"(?![A-Za-z0-9])",
+                              lambda m, r=right: r, text)
+            if new_text != text:
+                log.info("corrections: 綴り近似で置換 %r→%r (%.2f)", run, right, s)
+                text = new_text
+                p["last_used"] = time.time()
         return text
 
     def recent_corrected_terms(self, limit=15, max_entries=30):

@@ -3,7 +3,9 @@
 pynput ホットキースレッドからは Qt シグナル経由でトグルされる。
 認識はワーカースレッドで実行し、結果を Qt スロットで受けて注入する。
 """
+import ctypes
 import json
+import queue
 import threading
 import time
 from pathlib import Path
@@ -13,6 +15,7 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 from core import context as ctx
 from core import injector
 from core.recorder import Recorder
+from core.transcriber import Transcriber
 
 APP_DIR = Path(__file__).resolve().parent.parent
 HISTORY_FILE = APP_DIR / "data" / "history.jsonl"
@@ -79,6 +82,11 @@ class DictationController(QObject):
         self._record_started = 0.0
         self._record_context = ("", "")  # 録音開始時点の (exe, title)
         self._record_hwnd = None         # 録音開始時点のウィンドウ（自動復帰注入用）
+        # ストリーミング認識（config "streaming_transcribe"）の作業状態
+        self._stream_q = None            # 録音中のみ Queue。None なら従来の一括経路
+        self._stream_gen = 0             # 録音ごとに増やす世代番号（キャンセル後の遅延結果を捨てる）
+        self._stream_seg_idx = 0         # 次に積む区間の番号
+        self.transcriber_long = None     # 長い発話（区切りが起きた録音）用の第2モデル（config "model_long"）
 
         self.sig_toggle.connect(self._on_toggle)
         self.sig_cancel.connect(self._on_cancel)
@@ -124,7 +132,35 @@ class DictationController(QObject):
             self.state = IDLE
             self.sig_state.emit(IDLE)
             self.sig_message.emit("MO Voice", "準備完了。Ctrl+Alt+Space で録音開始")
+            # 第2モデルは準備完了の後に読む（起動の体感を通常モデルのロード時間に保つ）
+            self._load_long_model()
         threading.Thread(target=_load, daemon=True).start()
+
+    def _load_long_model(self):
+        """長い発話用の第2モデル（config "model_long"）をロードする。失敗しても通常モデルで動く。
+
+        逐次認識で区切りが起きた録音（発話約27秒以上）だけこのモデルで認識する。
+        medium は一括だと61〜128秒待ちで実用外だが、逐次なら13〜17秒待ちで誤りが small の
+        約半分になる（CLAUDE.md「medium を同条件で計測した結果」）。短い発話は通常モデルのまま。
+        """
+        name = (self.config.get("model_long") or "").strip()
+        if not name or name == self.transcriber.model_name:
+            self.transcriber_long = None
+            return
+        if self.transcriber_long is not None and self.transcriber_long.is_loaded:
+            return
+        try:
+            tr = Transcriber(name, self.transcriber.compute_type,
+                             self.transcriber.language, self.transcriber.beam_size)
+            tr.load()
+            self.transcriber_long = tr
+            injector.log.info("model_long=%s をロード（区切りが起きた長い録音で使用）", name)
+        except Exception:
+            injector.log.exception("model_long のロードに失敗。通常モデルで続行")
+            self.transcriber_long = None
+            self.sig_message.emit(
+                "MO Voice",
+                f"長い発話用モデル（{name}）を読み込めませんでした。通常のモデルで動作します")
 
     def retry_model_load(self):
         """モデルのロードをやり直す（トレイメニューから呼ばれる）。"""
@@ -158,11 +194,12 @@ class DictationController(QObject):
 
     def _start_recording(self):
         self._record_context = ctx.get_active_window()
-        import ctypes
         self._record_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        on_segment = self._stream_begin() if self._streaming_enabled() else None
         try:
-            self.recorder.start()
+            self.recorder.start(on_segment=on_segment)
         except Exception as e:
+            self._stream_abort()
             # PortAudio の生の英語メッセージをそのまま見せない
             # （OSError 以外にも PyAudio 初期化時の例外がありうるので広く捕まえる）
             injector.log.exception("マイクを開けませんでした")
@@ -181,6 +218,7 @@ class DictationController(QObject):
         if self.state == RECORDING:
             self._max_timer.stop()
             self.recorder.cancel()
+            self._stream_abort()
             self.state = IDLE
             self.sig_state.emit(IDLE)
 
@@ -195,10 +233,16 @@ class DictationController(QObject):
         if device_lost:
             # マイクが切断された等で録音が途中終了。ここまでの音声を
             # 「正常な認識結果」として扱うと誤ったテキストが注入されうるため中止する
+            self._stream_abort()
             self.state = IDLE
             self.sig_state.emit(IDLE)
             self.sig_message.emit(
                 "MO Voice", "マイクが切断されたため録音を中止しました")
+            return
+
+        if self._stream_q is not None:
+            # ストリーミング認識: 確定済み区間は録音中に認識済み。末尾区間だけ積んで完了を待つ
+            self._stream_finish(audio, duration)
             return
 
         exe, title = self._record_context
@@ -228,6 +272,111 @@ class DictationController(QObject):
                               audio_file)
             self.sig_transcribed.emit(text)
         threading.Thread(target=_work, daemon=True).start()
+
+    # ---- ストリーミング認識（録音中の逐次認識・config "streaming_transcribe"） ----
+    #
+    # 録音中に Recorder が「発話約24〜30秒ぶん＋次のポーズ」で区切った区間を渡してくるので、
+    # 1本のワーカースレッドが順番に transcribe() する（同時に2つ走らせない: CPU競合と
+    # モデルのスレッド安全性のため）。停止時は末尾の区間だけを認識すればよく、3〜5分の発話で
+    # 停止後の待ち時間が 15〜51秒→約4秒に縮む。区間ごとに transcribe() を呼ぶぶん合計の
+    # 計算量は +25〜45% 増えるが、その増分は録音中に隠れる（実測は CLAUDE.md
+    # 「録音と音声認識の並行処理」）。既定オフ。オフのときは従来の一括経路のまま。
+
+    def _streaming_enabled(self) -> bool:
+        return bool(self.config.get("streaming_transcribe", False))
+
+    def _stream_begin(self):
+        """録音開始時に呼ぶ。ワーカーを起動し、Recorder に渡すコールバックを返す。"""
+        self._stream_gen += 1
+        gen = self._stream_gen
+        exe, title = self._record_context
+        categories = ctx.resolve_categories(
+            self.config.get("context_rules", []), exe, title)
+        prompt = self.prompt_builder.build_prompt(
+            self.vocabulary, self.corrections, categories,
+            use_vault_vocab=self.config.get("use_vault_vocab", False))
+        q = queue.Queue()
+        self._stream_q = q
+        self._stream_seg_idx = 0
+
+        def on_segment(audio):
+            # Recorder のスレッドから呼ばれる。積むだけにして録音を止めない
+            idx = self._stream_seg_idx
+            self._stream_seg_idx += 1
+            q.put(("seg", gen, idx, audio, False))
+
+        threading.Thread(
+            target=self._stream_worker, args=(gen, q, prompt, categories),
+            daemon=True).start()
+        return on_segment
+
+    def _stream_abort(self):
+        """キャンセル・マイクエラー時。ワーカーを終わらせ、遅れて届く結果を捨てる。"""
+        q, self._stream_q = self._stream_q, None
+        self._stream_gen += 1
+        if q is not None:
+            q.put(None)
+
+    def _stream_finish(self, audio, duration):
+        """録音停止時。末尾区間と完了指示を積む（結果は sig_transcribed で返る）。"""
+        q, self._stream_q = self._stream_q, None
+        tail = audio[self.recorder.tail_start:]
+        n = self._stream_seg_idx + 1
+        q.put(("seg", self._stream_gen, n - 1, tail, True))
+        q.put(("finish", self._stream_gen, audio, duration, time.time(), n))
+
+    def _stream_worker(self, gen, q, prompt, categories):
+        results = {}    # idx -> (text, words, 認識秒)
+        errors = 0
+        exe, title = self._record_context
+        while True:
+            item = q.get()
+            if item is None:
+                return
+            if item[1] != gen:
+                continue
+            if item[0] == "seg":
+                _, _, idx, seg_audio, is_tail = item
+                # 区切りが起きた録音（＝長い発話）は第2モデル、末尾しかない録音は通常モデル
+                long_tr = self.transcriber_long
+                use_long = (long_tr is not None and long_tr.is_loaded
+                            and (not is_tail or idx > 0))
+                tr = long_tr if use_long else self.transcriber
+                t0 = time.time()
+                try:
+                    text = tr.transcribe(seg_audio, initial_prompt=prompt)
+                    words = list(tr.last_words)
+                except Exception:
+                    injector.log.exception("streaming: 区間%dの認識に失敗", idx)
+                    text, words, errors = "", [], errors + 1
+                results[idx] = (text, words, time.time() - t0)
+                injector.log.info("streaming: 区間%d 音声%.1fs 認識%.2fs model=%s",
+                                  idx, len(seg_audio) / 16000, time.time() - t0,
+                                  tr.model_name)
+                continue
+            # "finish": 全区間を順番どおりに結合して、従来の一括経路と同じ後処理をする
+            _, _, full_audio, duration, t_stop, n = item
+            ordered = [results.get(i, ("", [], 0.0)) for i in range(n)]
+            text = "".join(t for t, _, _ in ordered)
+            words = [w for _, ws, _ in ordered for w in ws]
+            injector.log.info(
+                "streaming: 区間%d 合計認識%.1fs 停止後の待ち%.2fs（録音%.1fs）",
+                n, sum(s for _, _, s in ordered), time.time() - t_stop, duration)
+            audio_file = self._save_audio(full_audio)
+            try:
+                text = self.corrections.apply(text)
+                self.transcriber.last_words = words
+                self._last_low_words = self._pick_low_confidence_words()
+            except Exception as e:
+                self._last_low_words = []
+                self.sig_message.emit("MO Voice", f"認識エラー: {e}")
+            if errors:
+                self.sig_message.emit(
+                    "MO Voice", f"一部の区間（{errors}個）の認識に失敗しました")
+            self._log_history(text, exe, title, duration, categories, audio_file)
+            if gen == self._stream_gen:
+                self.sig_transcribed.emit(text)
+            return
 
     def _pick_low_confidence_words(self):
         """直近の認識から信頼度が閾値未満の「区間」を抽出する。
@@ -310,16 +459,30 @@ class DictationController(QObject):
             return
         self.last_result = text
 
-        # 注入先ガード: 録音開始時と別ウィンドウなら注入せず通知のみ
-        exe_now, _ = ctx.get_active_window()
-        exe_rec = self._record_context[0]
-        if exe_rec and exe_now and exe_now != exe_rec:
-            # 録音中〜認識中にウィンドウが切り替わった。長い発話ほど認識に
-            # 時間がかかり、その間の自然なウィンドウ切り替えで頻発するため、
-            # 保留ではなく録音開始時のウィンドウへフォーカスを戻して注入する
+        # 注入先ガード: 録音開始時のウィンドウ（hwnd）と現在のフォーカス先が
+        # 違うなら、録音時のウィンドウへ戻ってから注入する。
+        #
+        # 2026-09-14: 以前は exe名（実行ファイル名）だけで比較していたため、
+        # 「同じアプリの別ウィンドウ」（複数のObsidian vaultを別ウィンドウで
+        # 開いている・複数のブラウザ/エディタウィンドウ等）へ録音中に切り替えた
+        # 場合を検知できず、意図しないウィンドウへ注入する抜け穴があった。
+        # hwnd（ウィンドウそのもの）で比較するよう変更しこれを塞いだ。
+        #
+        # 弊害: 認識待ちの間に「同じアプリの別ウィンドウ」へ意図的に切り替えた
+        # 場合も自動で元のウィンドウへ戻される（強制的にフォーカスを奪う）。
+        # 長い発話ほど認識に時間がかかり、その間に他の作業へ移っていると
+        # 作業中の画面が急に録音時の画面に切り替わる形で割り込む。
+        # ただし「保留にして貼り付けを諦める」より実害が小さいと判断し、
+        # 従来の exe名ベースの設計時から一貫してこの方針（保留より復帰優先）
+        # を採用している（0dd51b9f参照）。
+        #
+        # 残る既知の限界: 同じウィンドウ内でタブ・ノートだけ切り替えた場合
+        # （hwndは変わらない）は検知できず、切り替え先へ注入されてしまう。
+        current_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if self._record_hwnd and current_hwnd != self._record_hwnd:
             injector.log.info(
-                "注入先変更を検知: 録音時=%s 現在=%s → 元ウィンドウへ復帰注入を試行",
-                exe_rec, exe_now)
+                "注入先変更を検知: 録音時hwnd=%s 現在hwnd=%s → 元ウィンドウへ復帰注入を試行",
+                self._record_hwnd, current_hwnd)
             if injector.focus_window(self._record_hwnd):
                 if injector.inject(
                         text, self.config.get("injection_method", "clipboard")):
@@ -333,7 +496,8 @@ class DictationController(QObject):
                     if low:
                         self.sig_suggest_correction.emit(low)
                     return
-            # フォーカス復帰または注入に失敗 → 従来どおり保留
+            # フォーカス復帰または注入に失敗（録音時のウィンドウが閉じられた等）
+            # → 従来どおり保留
             injector.log.warning("復帰注入に失敗。クリップボード保留にフォールバック")
             self.last_result_injected = False
             injector._set_clipboard_text(text)
@@ -341,12 +505,10 @@ class DictationController(QObject):
                 "MO Voice", "ウィンドウが変わったため貼り付けを保留しました。"
                 "クリップボードにコピー済みです（Ctrl+V で貼り付け）")
             return
-        import ctypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
         self.last_result_injected = False
         if injector.inject(text, self.config.get("injection_method", "clipboard")):
             self.last_injected_text = text
-            self.last_inject_hwnd = hwnd
+            self.last_inject_hwnd = current_hwnd
             self.last_inject_time = time.time()
             self.last_result_injected = True
             # 低信頼語があれば修正ダイアログを自動で開く（ハイライト付き）。

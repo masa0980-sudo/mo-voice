@@ -361,7 +361,35 @@ class SettingsDialog(QDialog):
         form2.addRow("", _hint(
             "認識の確信度がこの値を下回った語を黄色く表示します。"
             "上げるほど頻繁に修正画面が開きます（既定は 0.60）。"))
+
+        self.sp_corr_font = QSpinBox()
+        self.sp_corr_font.setRange(9, 32)
+        self.sp_corr_font.setSuffix(" pt")
+        self.sp_corr_font.setValue(int(self._config.get("correction_font_pt", 14)))
+        form2.addRow("修正画面の文字サイズ", self.sp_corr_font)
+        form2.addRow("", _hint(
+            "Ctrl+Alt+Z で開く修正画面の本文の大きさです（既定は 14pt。画面は画面の6割幅で開きます）。"))
         outer.addWidget(box2)
+
+        box3 = QGroupBox("録音中の逐次認識（試験機能）")
+        form3 = QFormLayout(box3)
+        self.ck_stream = QCheckBox("録音しながら認識を進め、停止後は残りだけ認識する")
+        self.ck_stream.setChecked(bool(self._config.get("streaming_transcribe", False)))
+        form3.addRow(self.ck_stream)
+        form3.addRow("", _hint(
+            "発話が約25〜30秒たまるごとに次のポーズで区切って先に認識します。"
+            "3〜5分の長い発話で、停止後の待ち時間が21〜52秒→5〜6秒に縮みました（実測）。"
+            "30秒未満の発話では変わりません。CPUは録音中に使います（合計はほぼ同じ）。"))
+        self.cb_model_long = _combo(
+            [("", "使わない（上のモデルで認識）")] + MODELS,
+            self._config.get("model_long", ""))
+        form3.addRow("長い発話用のモデル", self.cb_model_long)
+        form3.addRow("", _hint(
+            "区切りが起きた録音（発話が約27秒以上）だけをこのモデルで認識します。"
+            "medium にすると長い発話の誤りが small の約半分になり、待ち時間は13〜17秒です"
+            "（一括だと1〜2分かかるので逐次認識と組み合わせて初めて実用になります）。"
+            "短い発話は上のモデル（small なら約5秒）のまま。変更後は再起動が必要です。"))
+        outer.addWidget(box3)
         outer.addStretch()
         return w
 
@@ -531,7 +559,10 @@ class SettingsDialog(QDialog):
                 "enabled": self.ck_conf.isChecked(),
                 "threshold": round(self.sp_conf.value(), 2),
             },
+            "correction_font_pt": self.sp_corr_font.value(),
             "use_vault_vocab": self.ck_vault.isChecked(),
+            "streaming_transcribe": self.ck_stream.isChecked(),
+            "model_long": self.cb_model_long.currentData() or "",
             "vault_path": vault,
         })
 

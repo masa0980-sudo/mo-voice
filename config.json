@@ -11,6 +11,12 @@
     "enabled": true,
     "threshold": 0.6
   },
+  "//correction_font_pt": "修正ダイアログ（Ctrl+Alt+Z）の本文の文字サイズ（pt）",
+  "correction_font_pt": 14,
+  "//streaming_transcribe": "録音中に発話約25〜30秒ごとに区切って先に認識し、停止後は残りだけ認識する。長い発話で停止後の待ち時間が大きく縮む（30秒未満の発話では変わらない）",
+  "streaming_transcribe": false,
+  "//model_long": "streaming_transcribe=true のとき、区切りが起きた長い録音だけに使う高精度モデル（例: medium）。空なら model を使う。変更は再起動が必要",
+  "model_long": "",
   "//use_vault_vocab": "vaultから抽出した語彙をinitial_promptに入れるか。既定false（実測で精度が悪化したため）",
   "use_vault_vocab": false,
   "vault_path": "",

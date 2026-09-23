@@ -47,7 +47,10 @@ DEFAULT_CONFIG = {
     "max_record_seconds": 300,
     "injection_method": "clipboard",
     "confidence_highlight": {"enabled": True, "threshold": 0.6},
+    "correction_font_pt": 14,
     "use_vault_vocab": False,
+    "streaming_transcribe": False,
+    "model_long": "",
     "vault_path": "",
     "context_rules": [{"exe": "", "title": "", "categories": ["global"]}],
 }
@@ -156,13 +159,16 @@ def main():
             tray.notify("MO Voice", "修正できる認識結果がまだありません")
             return
         original = controller.last_result
-        dlg = CorrectionDialog(original, highlight_words=highlight_words)
+        dlg = CorrectionDialog(
+            original, highlight_words=highlight_words,
+            font_pt=config.get("correction_font_pt", 14))
         if dlg.exec_():
             corrected = dlg.corrected_text()
             learned = corrections.learn(original, corrected)
             replaced, fail_reason = controller.replace_last_injection(corrected)
             controller.log_correction(original, corrected, learned, replaced)
             msgs = []
+            reflect_failed = False
             if learned:
                 pairs = " / ".join(f"「{w}」→「{r}」" for w, r in learned)
                 msgs.append(f"学習: {pairs}")
@@ -170,12 +176,18 @@ def main():
                 msgs.append("入力欄のテキストも置き換えました")
             elif not replaced and corrected != original:
                 # 自動反映に失敗しても修正文はクリップボードに積んである
-                # （controller側でフォールバック済み）ので手動で貼れる
+                # （controller側でフォールバック済み）ので手動で貼れる。
+                # ただし通常の4秒通知は他アプリ操作中だと見落とされやすく
+                # （実測で反映失敗が全体の4割を占めた）、クリップボードに
+                # 積んだだけで終わっていることに気づけない事故が起きていた
+                reflect_failed = True
                 msgs.append(
-                    f"入力欄への自動反映は失敗（{fail_reason}）。"
+                    f"⚠ 入力欄への自動反映は失敗（{fail_reason}）。"
                     "修正文をコピー済みなので Ctrl+V で貼り付けてください")
-            tray.notify("MO Voice", " / ".join(msgs) if msgs
-                        else "差分から学習できる置換はありませんでした")
+            tray.notify(
+                "MO Voice",
+                " / ".join(msgs) if msgs else "差分から学習できる置換はありませんでした",
+                urgent=reflect_failed)
 
     _rescan_lock = threading.Lock()
 

@@ -21,6 +21,10 @@ class Transcriber:
         # 低信頼語ハイライト（誤りの可能性がある箇所の可視化）に使う
         self.last_words = []
 
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
     def load(self):
         """モデルをロードする（初回のみ数秒〜数十秒）。バックグラウンドスレッドから呼ぶ。"""
         if self._model is None:

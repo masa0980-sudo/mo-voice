@@ -174,5 +174,15 @@ class Tray(QSystemTrayIcon):
         self.setToolTip(tips.get(state, "MO Voice"))
         self._act_retry.setVisible(state == "failed")
 
-    def notify(self, title: str, body: str):
-        self.showMessage(title, body, QSystemTrayIcon.Information, 4000)
+    def notify(self, title: str, body: str, urgent: bool = False):
+        """通知バルーンを表示する。
+
+        urgent=True は「入力欄への自動反映に失敗し、修正文はクリップボードに
+        積んだだけ」の場合に使う。既定の4秒・Informationアイコンでは、他の
+        アプリを操作中に見落として気づかないまま終わることが多かった
+        （実測でこの種の失敗が全体の4割を占める。CLAUDE.md参照）。
+        警告アイコン＋長め表示にして見落としを減らす。
+        """
+        icon = QSystemTrayIcon.Warning if urgent else QSystemTrayIcon.Information
+        duration = 15000 if urgent else 4000
+        self.showMessage(title, body, icon, duration)
